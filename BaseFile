@@ -29,6 +29,11 @@
     padding: 5px;
     margin: 2px;
   }
+  #taskText {
+    min-width: 240px;
+    padding: 8px 12px;
+    font-size: 16px;
+  }
   button:hover { background: #0ff3; cursor: pointer; }
 </style>
 </head>
@@ -50,8 +55,10 @@ let tasks = JSON.parse(localStorage.getItem('canvasTasks')) || [];
 let dragging = null;
 let offsetX = 0;
 let dragMoved = false;
-let clickTimeout = null;
 let timerInterval = null;
+let pendingClickTask = null;
+let allowClickEdit = false;
+let clickTimeout = null;
 
 const baseYear = new Date().getFullYear();
 const baseDate = new Date(baseYear, 0, 1);
@@ -187,12 +194,20 @@ function draw() {
 
 // ---- Interaction ----
 function isHit(t, mx, my) {
-  return Math.abs(mx - t.x) < 10 && Math.abs(my - H / 2) < 20;
+  const dx = mx - t.x;
+  const dy = my - H / 2;
+  return Math.sqrt(dx * dx + dy * dy) <= 14;
 }
 
 canvas.onmousedown = function (e) {
   const m = { x: e.offsetX, y: e.offsetY };
   dragging = null;
+  pendingClickTask = null;
+  allowClickEdit = false;
+  if (clickTimeout) {
+    clearTimeout(clickTimeout);
+    clickTimeout = null;
+  }
   for (let i = tasks.length - 1; i >= 0; i--) {
     const t = tasks[i];
     if (isHit(t, m.x, m.y)) {
@@ -209,6 +224,7 @@ function handleMouseUp() {
   if (dragging !== null) {
     const index = dragging;
     const t = tasks[index];
+    const moved = dragMoved;
     const finish = () => {
       delete t.tempX;
       dragging = null;
@@ -222,11 +238,29 @@ function handleMouseUp() {
       draw();
     } else {
       finish();
-      if (clickTimeout) clearTimeout(clickTimeout);
-      clickTimeout = setTimeout(() => {
-        openTaskDialog(index);
-        clickTimeout = null;
-      }, 220);
+      if (!moved) {
+        pendingClickTask = index;
+        allowClickEdit = true;
+        if (clickTimeout) {
+          clearTimeout(clickTimeout);
+          clickTimeout = null;
+        }
+        clickTimeout = setTimeout(() => {
+          if (allowClickEdit && pendingClickTask === index) {
+            openTaskDialog(index);
+          }
+          allowClickEdit = false;
+          pendingClickTask = null;
+          clickTimeout = null;
+        }, 220);
+      }
+    }
+  } else {
+    allowClickEdit = false;
+    pendingClickTask = null;
+    if (clickTimeout) {
+      clearTimeout(clickTimeout);
+      clickTimeout = null;
     }
   }
 }
@@ -243,12 +277,20 @@ canvas.onmousemove = function (e) {
       if (Math.abs(newX - startX) < 2) return;
     }
     dragMoved = true;
+    allowClickEdit = false;
+    pendingClickTask = null;
+    if (clickTimeout) {
+      clearTimeout(clickTimeout);
+      clickTimeout = null;
+    }
     task.tempX = newX;
     draw();
   }
 };
 
 canvas.ondblclick = function (e) {
+  allowClickEdit = false;
+  pendingClickTask = null;
   if (clickTimeout) {
     clearTimeout(clickTimeout);
     clickTimeout = null;
