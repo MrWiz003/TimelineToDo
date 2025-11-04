@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Canvas To-Do Timeline with Timers</title>
+<style>
+  body {
+    margin: 0;
+    background: #0b0b0b;
+    color: #0ff;
+    font-family: "Segoe UI", sans-serif;
+    overflow: hidden;
+  }
+  #controls {
+    position: absolute;
+    top: 10px; left: 10px;
+    z-index: 2;
+    background: rgba(0,0,0,0.6);
+    padding: 10px;
+    border: 1px solid #0ff3;
+    border-radius: 8px;
+  }
+  input, button {
+    background: #111;
+    color: #0ff;
+    border: 1px solid #0ff4;
+    border-radius: 5px;
+    padding: 5px;
+    margin: 2px;
+  }
+  button:hover { background: #0ff3; cursor: pointer; }
+</style>
+</head>
+<body>
+  <div id="controls">
+    <input id="taskText" type="text" placeholder="Task">
+    <input id="taskDate" type="date">
+    <input id="taskTimer" type="number" placeholder="Timer (min)" min="1">
+    <button onclick="addTask()">Add</button>
+    <button onclick="clearTasks()">Clear</button>
+  </div>
+  <canvas id="timelineCanvas"></canvas>
+
+<script>
+const canvas = document.getElementById('timelineCanvas');
+const ctx = canvas.getContext('2d');
+let W, H;
+let tasks = JSON.parse(localStorage.getItem('canvasTasks')) || [];
+let dragging = null;
+let offsetX = 0;
+let timerInterval = null;
+
+function resize() {
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width = W;
+  canvas.height = H;
+  draw();
+}
+
+let resizeTimer;
+window.onresize = () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(resize, 150);
+};
+
+// ---- Utility Conversions ----
+function dateToX(dateStr) {
+  const base = new Date().getFullYear();
+  const d = new Date(dateStr);
+  const yearDiff = d.getFullYear() - base;
+  return W / 2 + yearDiff * 200;
+}
+
+function xToDate(x) {
+  const baseYear = new Date().getFullYear();
+  const yearDiff = (x - W / 2) / 200;
+  const newYear = baseYear + yearDiff;
+  return new Date(newYear, 0, 1).toISOString().slice(0, 10);
+}
+
+// ---- Core Logic ----
+function addTask() {
+  const text = document.getElementById('taskText').value.trim();
+  const date = document.getElementById('taskDate').value;
+  const timerMinutes = parseInt(document.getElementById('taskTimer').value);
+  if (!text || !date) return alert('Enter task and date.');
+
+  const endTime = timerMinutes ? Date.now() + timerMinutes * 60000 : null;
+  tasks.push({ text, date, done: false, endTime });
+  document.getElementById('taskText').value = '';
+  document.getElementById('taskDate').value = '';
+  document.getElementById('taskTimer').value = '';
+  save();
+  draw();
+}
+
+function clearTasks() {
+  if (confirm('Erase all tasks?')) {
+    tasks = [];
+    save();
+    draw();
+  }
+}
+
+function save() {
+  localStorage.setItem('canvasTasks', JSON.stringify(tasks));
+}
+
+// ---- Drawing ----
+function drawTimeline() {
+  ctx.strokeStyle = '#0ff5';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(50, H / 2);
+  ctx.lineTo(W - 50, H / 2);
+  ctx.stroke();
+
+  const today = new Date();
+  for (let i = -2; i <= 2; i++) {
+    const year = today.getFullYear() + i;
+    const x = W / 2 + i * 200;
+    ctx.fillStyle = '#0ff8';
+    ctx.fillRect(x - 1, H / 2 - 6, 2, 12);
+    ctx.fillText(year, x - 15, H / 2 + 25);
+  }
+}
+
+function drawTasks() {
+  ctx.font = "14px Segoe UI";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+
+  const now = Date.now();
+  tasks.forEach((t, i) => {
+    const dateX = dateToX(t.date);
+    const y = H / 2 + (i % 2 === 0 ? -60 : 60);
+    t.x = dateX;
+    t.y = y;
+
+    // connector
+    ctx.beginPath();
+    ctx.moveTo(t.x, H / 2);
+    ctx.lineTo(t.x, t.y);
+    ctx.strokeStyle = t.done ? '#0f83' : '#0ff5';
+    ctx.stroke();
+
+    // node glow if timer expired
+    let glow = false;
+    if (t.endTime && now > t.endTime && !t.done) glow = true;
+
+    ctx.beginPath();
+    ctx.fillStyle = glow ? '#f00' : (t.done ? '#0f83' : '#0ff');
+    ctx.arc(t.x, H / 2, 6, 0, Math.PI * 2);
+    ctx.fill();
+
+    // label
+    ctx.fillStyle = t.done ? '#0f83' : '#0ff';
+    ctx.fillText(t.text, t.x, t.y);
+
+    // timer text
+    if (t.endTime && !t.done) {
+      const remaining = Math.max(0, t.endTime - now);
+      const mins = Math.floor(remaining / 60000);
+      const secs = Math.floor((remaining % 60000) / 1000);
+      const label = glow ? "TIME UP!" : `${mins}:${secs.toString().padStart(2,'0')}`;
+      ctx.fillStyle = glow ? '#f00' : '#0ff';
+      ctx.fillText(label, t.x, t.y + 20);
+    }
+  });
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawTimeline();
+  drawTasks();
+}
+
+// ---- Interaction ----
+function isHit(t, mx, my) {
+  return Math.abs(mx - t.x) < 10 && Math.abs(my - H / 2) < 20;
+}
+
+canvas.onmousedown = function (e) {
+  const m = { x: e.offsetX, y: e.offsetY };
+  tasks.forEach((t, i) => {
+    if (isHit(t, m.x, m.y)) {
+      dragging = i;
+      offsetX = m.x - t.x;
+    }
+  });
+};
+
+canvas.onmouseup = function () {
+  if (dragging !== null) {
+    const t = tasks[dragging];
+    t.date = xToDate(t.x);
+    dragging = null;
+    save();
+    draw();
+  }
+};
+
+canvas.onmousemove = function (e) {
+  if (dragging !== null) {
+    tasks[dragging].x = e.offsetX - offsetX;
+    draw();
+  }
+};
+
+canvas.ondblclick = function (e) {
+  const m = { x: e.offsetX, y: e.offsetY };
+  tasks.forEach((t) => {
+    if (isHit(t, m.x, m.y)) t.done = !t.done;
+  });
+  save();
+  draw();
+};
+
+// ---- Timer Engine ----
+function startTimerEngine() {
+  if (timerInterval) clearInterval(timerInterval);
+  timerInterval = setInterval(() => draw(), 1000);
+}
+
+resize();
+startTimerEngine();
+</script>
+</body>
+</html>
