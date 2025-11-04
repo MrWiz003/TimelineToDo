@@ -49,7 +49,14 @@ let W, H;
 let tasks = JSON.parse(localStorage.getItem('canvasTasks')) || [];
 let dragging = null;
 let offsetX = 0;
+let dragMoved = false;
+let clickTimeout = null;
 let timerInterval = null;
+
+const baseYear = new Date().getFullYear();
+const baseDate = new Date(baseYear, 0, 1);
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+const PX_PER_DAY = 200 / 365;
 
 function resize() {
   W = window.innerWidth;
@@ -67,17 +74,17 @@ window.onresize = () => {
 
 // ---- Utility Conversions ----
 function dateToX(dateStr) {
-  const base = new Date().getFullYear();
   const d = new Date(dateStr);
-  const yearDiff = d.getFullYear() - base;
-  return W / 2 + yearDiff * 200;
+  if (Number.isNaN(d.getTime())) return W / 2;
+  const diffDays = (d - baseDate) / MS_PER_DAY;
+  return W / 2 + diffDays * PX_PER_DAY;
 }
 
 function xToDate(x) {
-  const baseYear = new Date().getFullYear();
-  const yearDiff = (x - W / 2) / 200;
-  const newYear = baseYear + yearDiff;
-  return new Date(newYear, 0, 1).toISOString().slice(0, 10);
+  const diffDays = (x - W / 2) / PX_PER_DAY;
+  const ms = baseDate.getTime() + diffDays * MS_PER_DAY;
+  const date = new Date(ms);
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).toISOString().slice(0, 10);
 }
 
 // ---- Core Logic ----
@@ -134,7 +141,8 @@ function drawTasks() {
 
   const now = Date.now();
   tasks.forEach((t, i) => {
-    const dateX = dateToX(t.date);
+    const dateX = (dragging === i && typeof t.tempX === 'number') ? t.tempX : dateToX(t.date);
+    if (dragging !== i) delete t.tempX;
     const y = H / 2 + (i % 2 === 0 ? -60 : 60);
     t.x = dateX;
     t.y = y;
@@ -184,32 +192,67 @@ function isHit(t, mx, my) {
 
 canvas.onmousedown = function (e) {
   const m = { x: e.offsetX, y: e.offsetY };
-  tasks.forEach((t, i) => {
+  dragging = null;
+  for (let i = tasks.length - 1; i >= 0; i--) {
+    const t = tasks[i];
     if (isHit(t, m.x, m.y)) {
       dragging = i;
       offsetX = m.x - t.x;
+      dragMoved = false;
+      t.tempX = t.x;
+      break;
     }
-  });
-};
-
-canvas.onmouseup = function () {
-  if (dragging !== null) {
-    const t = tasks[dragging];
-    t.date = xToDate(t.x);
-    dragging = null;
-    save();
-    draw();
   }
 };
 
+function handleMouseUp() {
+  if (dragging !== null) {
+    const index = dragging;
+    const t = tasks[index];
+    const finish = () => {
+      delete t.tempX;
+      dragging = null;
+      dragMoved = false;
+    };
+    if (dragMoved) {
+      const newX = typeof t.tempX === 'number' ? t.tempX : t.x;
+      t.date = xToDate(newX);
+      finish();
+      save();
+      draw();
+    } else {
+      finish();
+      if (clickTimeout) clearTimeout(clickTimeout);
+      clickTimeout = setTimeout(() => {
+        openTaskDialog(index);
+        clickTimeout = null;
+      }, 220);
+    }
+  }
+}
+
+canvas.onmouseup = handleMouseUp;
+window.addEventListener('mouseup', handleMouseUp);
+
 canvas.onmousemove = function (e) {
   if (dragging !== null) {
-    tasks[dragging].x = e.offsetX - offsetX;
+    const task = tasks[dragging];
+    const newX = e.offsetX - offsetX;
+    if (!dragMoved) {
+      const startX = typeof task.tempX === 'number' ? task.tempX : task.x;
+      if (Math.abs(newX - startX) < 2) return;
+    }
+    dragMoved = true;
+    task.tempX = newX;
     draw();
   }
 };
 
 canvas.ondblclick = function (e) {
+  if (clickTimeout) {
+    clearTimeout(clickTimeout);
+    clickTimeout = null;
+  }
   const m = { x: e.offsetX, y: e.offsetY };
   tasks.forEach((t) => {
     if (isHit(t, m.x, m.y)) t.done = !t.done;
@@ -217,6 +260,60 @@ canvas.ondblclick = function (e) {
   save();
   draw();
 };
+
+function openTaskDialog(index) {
+  const task = tasks[index];
+  if (!task) return;
+  const action = prompt('Enter "edit" to modify or "delete" to remove this task.', 'edit');
+  if (!action) return;
+  const choice = action.trim().toLowerCase();
+  if (choice === 'delete' || choice === 'd') {
+    if (confirm(`Delete "${task.text}"?`)) {
+      tasks.splice(index, 1);
+      save();
+      draw();
+    }
+    return;
+  }
+  if (choice !== 'edit' && choice !== 'e') return;
+
+  const newText = prompt('Task description:', task.text);
+  if (newText === null) return;
+  const trimmedText = newText.trim();
+  if (!trimmedText) {
+    alert('Task description cannot be empty.');
+    return;
+  }
+
+  const newDateInput = prompt('Task date (YYYY-MM-DD):', task.date);
+  if (newDateInput === null) return;
+  const trimmedDate = newDateInput.trim();
+  const parsedDate = new Date(trimmedDate);
+  if (!trimmedDate || Number.isNaN(parsedDate.getTime())) {
+    alert('Invalid date.');
+    return;
+  }
+
+  const remainingMs = task.endTime && task.endTime > Date.now() ? task.endTime - Date.now() : 0;
+  const defaultMinutes = remainingMs > 0 ? Math.ceil(remainingMs / 60000) : '';
+  const timerInput = prompt('Timer minutes (leave blank to remove timer):', defaultMinutes);
+  if (timerInput === null) return;
+
+  task.text = trimmedText;
+  task.date = trimmedDate;
+
+  const timerTrimmed = timerInput.trim();
+  const minutes = parseInt(timerTrimmed, 10);
+  if (timerTrimmed === '' || Number.isNaN(minutes) || minutes <= 0) {
+    task.endTime = null;
+  } else {
+    task.endTime = Date.now() + minutes * 60000;
+    task.done = false;
+  }
+
+  save();
+  draw();
+}
 
 // ---- Timer Engine ----
 function startTimerEngine() {
