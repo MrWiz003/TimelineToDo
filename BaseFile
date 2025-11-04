@@ -40,7 +40,7 @@
 <body>
   <div id="controls">
     <input id="taskText" type="text" placeholder="Task">
-    <input id="taskDate" type="date">
+    <input id="taskDate" type="datetime-local">
     <input id="taskTimer" type="number" placeholder="Timer (min)" min="1">
     <button onclick="addTask()">Add</button>
     <button onclick="clearTasks()">Clear</button>
@@ -52,13 +52,17 @@ const canvas = document.getElementById('timelineCanvas');
 const ctx = canvas.getContext('2d');
 let W, H;
 let tasks = JSON.parse(localStorage.getItem('canvasTasks')) || [];
+tasks.forEach((t) => {
+  if (t.date && !t.date.includes('T')) {
+    const normalized = normalizeDateInput(`${t.date}T00:00`);
+    if (normalized) t.date = normalized;
+  }
+});
 let dragging = null;
 let offsetX = 0;
 let dragMoved = false;
 let timerInterval = null;
-let pendingClickTask = null;
-let allowClickEdit = false;
-let clickTimeout = null;
+const DATE_TIME_PROMPT_FORMAT = 'YYYY-MM-DD HH:MM';
 
 const baseYear = new Date().getFullYear();
 const baseDate = new Date(baseYear, 0, 1);
@@ -87,22 +91,53 @@ function dateToX(dateStr) {
   return W / 2 + diffDays * PX_PER_DAY;
 }
 
+function pad(num) {
+  return num.toString().padStart(2, '0');
+}
+
+function formatDateTimeLocal(date) {
+  const year = date.getFullYear();
+  const month = pad(date.getMonth() + 1);
+  const day = pad(date.getDate());
+  const hours = pad(date.getHours());
+  const minutes = pad(date.getMinutes());
+  return `${year}-${month}-${day}T${hours}:${minutes}`;
+}
+
+function formatDateTimePrompt(dateStr) {
+  const d = new Date(dateStr);
+  if (Number.isNaN(d.getTime())) return dateStr || '';
+  const local = formatDateTimeLocal(d);
+  return local.replace('T', ' ');
+}
+
+function normalizeDateInput(value) {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const normalized = trimmed.includes('T') ? trimmed : trimmed.replace(' ', 'T');
+  const parsed = new Date(normalized);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return formatDateTimeLocal(parsed);
+}
+
 function xToDate(x) {
   const diffDays = (x - W / 2) / PX_PER_DAY;
   const ms = baseDate.getTime() + diffDays * MS_PER_DAY;
   const date = new Date(ms);
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).toISOString().slice(0, 10);
+  return formatDateTimeLocal(date);
 }
 
 // ---- Core Logic ----
 function addTask() {
   const text = document.getElementById('taskText').value.trim();
-  const date = document.getElementById('taskDate').value;
+  const dateInput = document.getElementById('taskDate').value;
   const timerMinutes = parseInt(document.getElementById('taskTimer').value);
-  if (!text || !date) return alert('Enter task and date.');
+  const normalizedDate = normalizeDateInput(dateInput);
+  if (!text || !normalizedDate) return alert('Enter task, valid date, and time.');
 
   const endTime = timerMinutes ? Date.now() + timerMinutes * 60000 : null;
-  tasks.push({ text, date, done: false, endTime });
+  tasks.push({ text, date: normalizedDate, done: false, endTime });
   document.getElementById('taskText').value = '';
   document.getElementById('taskDate').value = '';
   document.getElementById('taskTimer').value = '';
@@ -202,12 +237,6 @@ function isHit(t, mx, my) {
 canvas.onmousedown = function (e) {
   const m = { x: e.offsetX, y: e.offsetY };
   dragging = null;
-  pendingClickTask = null;
-  allowClickEdit = false;
-  if (clickTimeout) {
-    clearTimeout(clickTimeout);
-    clickTimeout = null;
-  }
   for (let i = tasks.length - 1; i >= 0; i--) {
     const t = tasks[i];
     if (isHit(t, m.x, m.y)) {
@@ -224,44 +253,18 @@ function handleMouseUp() {
   if (dragging !== null) {
     const index = dragging;
     const t = tasks[index];
-    const moved = dragMoved;
-    const finish = () => {
-      delete t.tempX;
-      dragging = null;
-      dragMoved = false;
-    };
     if (dragMoved) {
       const newX = typeof t.tempX === 'number' ? t.tempX : t.x;
-      t.date = xToDate(newX);
-      finish();
-      save();
-      draw();
-    } else {
-      finish();
-      if (!moved) {
-        pendingClickTask = index;
-        allowClickEdit = true;
-        if (clickTimeout) {
-          clearTimeout(clickTimeout);
-          clickTimeout = null;
-        }
-        clickTimeout = setTimeout(() => {
-          if (allowClickEdit && pendingClickTask === index) {
-            openTaskDialog(index);
-          }
-          allowClickEdit = false;
-          pendingClickTask = null;
-          clickTimeout = null;
-        }, 220);
+      const newDate = xToDate(newX);
+      if (newDate) {
+        t.date = newDate;
+        save();
       }
     }
-  } else {
-    allowClickEdit = false;
-    pendingClickTask = null;
-    if (clickTimeout) {
-      clearTimeout(clickTimeout);
-      clickTimeout = null;
-    }
+    delete t.tempX;
+    dragging = null;
+    dragMoved = false;
+    draw();
   }
 }
 
@@ -277,36 +280,25 @@ canvas.onmousemove = function (e) {
       if (Math.abs(newX - startX) < 2) return;
     }
     dragMoved = true;
-    allowClickEdit = false;
-    pendingClickTask = null;
-    if (clickTimeout) {
-      clearTimeout(clickTimeout);
-      clickTimeout = null;
-    }
     task.tempX = newX;
     draw();
   }
 };
 
 canvas.ondblclick = function (e) {
-  allowClickEdit = false;
-  pendingClickTask = null;
-  if (clickTimeout) {
-    clearTimeout(clickTimeout);
-    clickTimeout = null;
-  }
   const m = { x: e.offsetX, y: e.offsetY };
-  tasks.forEach((t) => {
-    if (isHit(t, m.x, m.y)) t.done = !t.done;
-  });
-  save();
-  draw();
+  for (let i = tasks.length - 1; i >= 0; i--) {
+    if (isHit(tasks[i], m.x, m.y)) {
+      openTaskDialog(i);
+      break;
+    }
+  }
 };
 
 function openTaskDialog(index) {
   const task = tasks[index];
   if (!task) return;
-  const action = prompt('Enter "edit" to modify or "delete" to remove this task.', 'edit');
+  const action = prompt('Enter "edit" to modify, "delete" to remove, or "toggle" to mark complete/incomplete.', 'edit');
   if (!action) return;
   const choice = action.trim().toLowerCase();
   if (choice === 'delete' || choice === 'd') {
@@ -315,6 +307,12 @@ function openTaskDialog(index) {
       save();
       draw();
     }
+    return;
+  }
+  if (choice === 'toggle' || choice === 't') {
+    task.done = !task.done;
+    save();
+    draw();
     return;
   }
   if (choice !== 'edit' && choice !== 'e') return;
@@ -327,12 +325,12 @@ function openTaskDialog(index) {
     return;
   }
 
-  const newDateInput = prompt('Task date (YYYY-MM-DD):', task.date);
+  const defaultDatePrompt = formatDateTimePrompt(task.date);
+  const newDateInput = prompt(`Task date & time (${DATE_TIME_PROMPT_FORMAT}):`, defaultDatePrompt);
   if (newDateInput === null) return;
-  const trimmedDate = newDateInput.trim();
-  const parsedDate = new Date(trimmedDate);
-  if (!trimmedDate || Number.isNaN(parsedDate.getTime())) {
-    alert('Invalid date.');
+  const normalizedDate = normalizeDateInput(newDateInput);
+  if (!normalizedDate) {
+    alert('Invalid date/time.');
     return;
   }
 
@@ -342,7 +340,7 @@ function openTaskDialog(index) {
   if (timerInput === null) return;
 
   task.text = trimmedText;
-  task.date = trimmedDate;
+  task.date = normalizedDate;
 
   const timerTrimmed = timerInput.trim();
   const minutes = parseInt(timerTrimmed, 10);
