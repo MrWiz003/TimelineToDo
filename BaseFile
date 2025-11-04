@@ -64,10 +64,20 @@ let dragMoved = false;
 let timerInterval = null;
 const DATE_TIME_PROMPT_FORMAT = 'YYYY-MM-DD HH:MM';
 
-const baseYear = new Date().getFullYear();
-const baseDate = new Date(baseYear, 0, 1);
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
-const PX_PER_DAY = 200 / 365;
+const TIMELINE_MARGIN = 120;
+const MONTH_NAMES_FULL = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December'
+];
+const MONTH_LABELS = MONTH_NAMES_FULL.map((name) => name.slice(0, 3));
+
+let focusYear = new Date().getFullYear();
+let baseDate = new Date(focusYear, 0, 1);
+let daysInFocusYear = 365;
+let timelineStart = 0;
+let timelineEnd = 0;
+let pxPerDay = 1;
 
 function resize() {
   W = window.innerWidth;
@@ -84,11 +94,73 @@ window.onresize = () => {
 };
 
 // ---- Utility Conversions ----
+function determineFocusYear() {
+  const now = Date.now();
+  const currentYear = new Date().getFullYear();
+  if (!tasks.length) return currentYear;
+
+  const yearStats = new Map();
+  tasks.forEach((task) => {
+    const d = new Date(task.date);
+    if (Number.isNaN(d.getTime())) return;
+    const year = d.getFullYear();
+    const diff = Math.abs(d.getTime() - now);
+    if (!yearStats.has(year)) {
+      yearStats.set(year, { count: 0, closestDiff: diff });
+    }
+    const entry = yearStats.get(year);
+    entry.count += 1;
+    if (diff < entry.closestDiff) entry.closestDiff = diff;
+  });
+
+  let bestYear = currentYear;
+  let bestCount = 0;
+  let bestDiff = Infinity;
+  yearStats.forEach((value, year) => {
+    if (
+      value.count > bestCount ||
+      (value.count === bestCount && value.closestDiff < bestDiff) ||
+      (
+        value.count === bestCount &&
+        value.closestDiff === bestDiff &&
+        Math.abs(year - currentYear) < Math.abs(bestYear - currentYear)
+      )
+    ) {
+      bestYear = year;
+      bestCount = value.count;
+      bestDiff = value.closestDiff;
+    }
+  });
+
+  return bestYear;
+}
+
+function isLeapYear(year) {
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+}
+
+function updateTimelineMetrics() {
+  const computedYear = determineFocusYear();
+  if (dragging === null || !dragMoved) {
+    focusYear = computedYear;
+  }
+  baseDate = new Date(focusYear, 0, 1);
+  daysInFocusYear = isLeapYear(focusYear) ? 366 : 365;
+  const dynamicMargin = Math.min(TIMELINE_MARGIN, W / 6);
+  timelineStart = dynamicMargin;
+  timelineEnd = Math.max(timelineStart + 1, W - dynamicMargin);
+  const timelineWidth = timelineEnd - timelineStart;
+  pxPerDay = timelineWidth / daysInFocusYear;
+}
+
 function dateToX(dateStr) {
   const d = new Date(dateStr);
-  if (Number.isNaN(d.getTime())) return W / 2;
+  if (Number.isNaN(d.getTime()) || !Number.isFinite(pxPerDay) || pxPerDay <= 0) {
+    return (timelineStart + timelineEnd) / 2;
+  }
   const diffDays = (d - baseDate) / MS_PER_DAY;
-  return W / 2 + diffDays * PX_PER_DAY;
+  const x = timelineStart + diffDays * pxPerDay;
+  return Math.min(Math.max(x, timelineStart), timelineEnd);
 }
 
 function pad(num) {
@@ -122,10 +194,27 @@ function normalizeDateInput(value) {
 }
 
 function xToDate(x) {
-  const diffDays = (x - W / 2) / PX_PER_DAY;
+  if (!Number.isFinite(pxPerDay) || pxPerDay <= 0) {
+    return formatDateTimeLocal(new Date());
+  }
+  const clampedX = Math.min(Math.max(x, timelineStart), timelineEnd);
+  const diffDays = (clampedX - timelineStart) / pxPerDay;
   const ms = baseDate.getTime() + diffDays * MS_PER_DAY;
   const date = new Date(ms);
   return formatDateTimeLocal(date);
+}
+
+function formatDisplayDate(dateStr) {
+  const d = new Date(dateStr);
+  if (Number.isNaN(d.getTime())) return dateStr || '';
+  const month = MONTH_NAMES_FULL[d.getMonth()];
+  const day = d.getDate();
+  const year = d.getFullYear();
+  let hours = d.getHours();
+  const minutes = pad(d.getMinutes());
+  const ampm = hours >= 12 ? 'PM' : 'AM';
+  hours = hours % 12 || 12;
+  return `${month} ${day}, ${year} ${hours}:${minutes} ${ampm}`;
 }
 
 // ---- Core Logic ----
@@ -159,35 +248,48 @@ function save() {
 
 // ---- Drawing ----
 function drawTimeline() {
+  ctx.save();
   ctx.strokeStyle = '#0ff5';
   ctx.lineWidth = 3;
   ctx.beginPath();
-  ctx.moveTo(50, H / 2);
-  ctx.lineTo(W - 50, H / 2);
+  ctx.moveTo(timelineStart, H / 2);
+  ctx.lineTo(timelineEnd, H / 2);
   ctx.stroke();
 
-  const today = new Date();
-  for (let i = -2; i <= 2; i++) {
-    const year = today.getFullYear() + i;
-    const x = W / 2 + i * 200;
-    ctx.fillStyle = '#0ff8';
+  ctx.fillStyle = '#0ff8';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.font = '12px Segoe UI';
+
+  for (let month = 0; month <= 12; month++) {
+    const monthDate = new Date(focusYear, month, 1);
+    const diffDays = (monthDate - baseDate) / MS_PER_DAY;
+    const x = timelineStart + diffDays * pxPerDay;
     ctx.fillRect(x - 1, H / 2 - 6, 2, 12);
-    ctx.fillText(year, x - 15, H / 2 + 25);
+    if (month < 12) {
+      ctx.fillText(MONTH_LABELS[month], x, H / 2 + 14);
+    }
   }
+
+  ctx.font = '16px Segoe UI';
+  ctx.fillText(`${focusYear}`, (timelineStart + timelineEnd) / 2, H / 2 + 36);
+  ctx.restore();
 }
 
 function drawTasks() {
-  ctx.font = "14px Segoe UI";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
+  ctx.font = '15px Segoe UI';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
 
   const now = Date.now();
   tasks.forEach((t, i) => {
     const dateX = (dragging === i && typeof t.tempX === 'number') ? t.tempX : dateToX(t.date);
     if (dragging !== i) delete t.tempX;
-    const y = H / 2 + (i % 2 === 0 ? -60 : 60);
+    const isUpper = i % 2 === 0;
+    const textY = H / 2 + (isUpper ? -60 : 60);
+    const dateY = textY - 18;
     t.x = dateX;
-    t.y = y;
+    t.y = textY;
 
     // connector
     ctx.beginPath();
@@ -206,6 +308,15 @@ function drawTasks() {
     ctx.fill();
 
     // label
+    ctx.fillStyle = t.done ? '#0f83' : '#0ffb';
+    ctx.font = '12px Segoe UI';
+    ctx.save();
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(formatDisplayDate(t.date), t.x, dateY);
+    ctx.restore();
+
+    ctx.textBaseline = 'middle';
+    ctx.font = '15px Segoe UI';
     ctx.fillStyle = t.done ? '#0f83' : '#0ff';
     ctx.fillText(t.text, t.x, t.y);
 
@@ -222,6 +333,7 @@ function drawTasks() {
 }
 
 function draw() {
+  updateTimelineMetrics();
   ctx.clearRect(0, 0, W, H);
   drawTimeline();
   drawTasks();
@@ -274,7 +386,8 @@ window.addEventListener('mouseup', handleMouseUp);
 canvas.onmousemove = function (e) {
   if (dragging !== null) {
     const task = tasks[dragging];
-    const newX = e.offsetX - offsetX;
+    const desiredX = e.offsetX - offsetX;
+    const newX = Math.min(Math.max(desiredX, timelineStart), timelineEnd);
     if (!dragMoved) {
       const startX = typeof task.tempX === 'number' ? task.tempX : task.x;
       if (Math.abs(newX - startX) < 2) return;
