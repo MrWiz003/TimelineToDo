@@ -53,16 +53,17 @@
   }
   #notesPanel {
     position: absolute;
-    bottom: 20px;
-    right: 20px;
-    width: min(340px, 30vw);
-    min-width: 220px;
-    max-width: calc(100% - 40px);
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: min(520px, 60vw);
+    min-width: 240px;
+    max-width: calc(100% - 80px);
     background: rgba(0,0,0,0.75);
     border: 1px solid #0ff3;
-    border-radius: 10px;
-    padding: 12px 16px 16px;
-    box-shadow: 0 6px 18px rgba(0, 255, 255, 0.15);
+    border-radius: 12px;
+    padding: 14px 18px 18px;
+    box-shadow: 0 10px 22px rgba(0, 255, 255, 0.18);
   }
   #notesPanel label {
     display: block;
