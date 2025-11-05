@@ -11,6 +11,10 @@
     color: #0ff;
     font-family: "Segoe UI", sans-serif;
     overflow: hidden;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    position: relative;
   }
   #controls {
     position: absolute;
@@ -21,7 +25,11 @@
     border: 1px solid #0ff3;
     border-radius: 8px;
   }
-  input, button {
+  #canvasContainer {
+    flex: 1;
+    position: relative;
+  }
+  input, button, textarea {
     background: #111;
     color: #0ff;
     border: 1px solid #0ff4;
@@ -29,31 +37,140 @@
     padding: 5px;
     margin: 2px;
   }
+  #taskText {
+    min-width: 240px;
+    padding: 8px 12px;
+    font-size: 16px;
+  }
+  #timelineLength {
+    min-width: 160px;
+  }
   button:hover { background: #0ff3; cursor: pointer; }
+  #timelineCanvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+  #notesPanel {
+    position: absolute;
+    top: 24px;
+    right: 24px;
+    transform: none;
+    width: min(420px, 50vw);
+    min-width: 240px;
+    max-width: calc(100% - 80px);
+    background: rgba(0,0,0,0.75);
+    border: 1px solid #0ff3;
+    border-radius: 12px;
+    padding: 14px 18px 18px;
+    box-shadow: 0 10px 22px rgba(0, 255, 255, 0.18);
+  }
+  #notesPanel label {
+    display: block;
+    font-size: 14px;
+    margin-bottom: 6px;
+    color: #7ff;
+  }
+  #quickNotes {
+    width: 100%;
+    min-height: 110px;
+    resize: vertical;
+    font-size: 14px;
+    padding: 8px 10px;
+  }
+  .notes-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 8px;
+  }
 </style>
 </head>
 <body>
   <div id="controls">
     <input id="taskText" type="text" placeholder="Task">
-    <input id="taskDate" type="date">
+    <input id="taskDate" type="datetime-local">
+    <input id="timelineLength" type="text" placeholder="Timeline length (e.g., 1 year)">
     <input id="taskTimer" type="number" placeholder="Timer (min)" min="1">
     <button onclick="addTask()">Add</button>
     <button onclick="clearTasks()">Clear</button>
+    <button onclick="exportTasksCsv()">Export Timeline CSV</button>
   </div>
-  <canvas id="timelineCanvas"></canvas>
+  <div id="canvasContainer">
+    <canvas id="timelineCanvas"></canvas>
+  </div>
+  <div id="notesPanel">
+    <label for="quickNotes">Quick Notes</label>
+    <textarea id="quickNotes" placeholder="Type quick notes..."></textarea>
+    <div class="notes-actions">
+      <button onclick="exportNotesTxt()">Export Notes</button>
+    </div>
+  </div>
 
 <script>
+const canvasContainer = document.getElementById('canvasContainer');
 const canvas = document.getElementById('timelineCanvas');
 const ctx = canvas.getContext('2d');
 let W, H;
 let tasks = JSON.parse(localStorage.getItem('canvasTasks')) || [];
+let seededVerticalSides = false;
+tasks.forEach((t, index) => {
+  if (t.date && !t.date.includes('T')) {
+    const normalized = normalizeDateInput(`${t.date}T00:00`);
+    if (normalized) t.date = normalized;
+  }
+  if (!t.verticalSide) {
+    t.verticalSide = index % 2 === 0 ? 'top' : 'bottom';
+    seededVerticalSides = true;
+  }
+});
+if (seededVerticalSides) {
+  localStorage.setItem('canvasTasks', JSON.stringify(tasks));
+}
 let dragging = null;
 let offsetX = 0;
+let dragMoved = false;
+let suppressNextClick = false;
+let clickTimer = null;
 let timerInterval = null;
+const NOTES_KEY = 'timelineQuickNotes';
+const notesField = document.getElementById('quickNotes');
+const DATE_TIME_PROMPT_FORMAT = 'YYYY-MM-DD HH:MM';
+const CLICK_DELAY_MS = 220;
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+const TIMELINE_MARGIN = 120;
+const MONTH_NAMES_FULL = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December'
+];
+const MONTH_LABELS = MONTH_NAMES_FULL.map((name) => name.slice(0, 3));
+
+const DEFAULT_TIMELINE_SPEC = '1 year';
+
+let focusAnchorDate = new Date();
+let timelineSpanSpec = localStorage.getItem('timelineSpanSpec') || DEFAULT_TIMELINE_SPEC;
+let timelineSpanDays = 0;
+let timelineSpanMs = 0;
+let timelineStartDate = new Date();
+let timelineEndDate = new Date();
+let timelineStart = 0;
+let timelineEnd = 0;
+let pxPerMs = 1;
+
+if (notesField) {
+  notesField.value = localStorage.getItem(NOTES_KEY) || '';
+  notesField.addEventListener('input', () => {
+    localStorage.setItem(NOTES_KEY, notesField.value);
+  });
+}
 
 function resize() {
-  W = window.innerWidth;
-  H = window.innerHeight;
+  const rect = canvasContainer ? canvasContainer.getBoundingClientRect() : null;
+  const width = rect && rect.width ? rect.width : window.innerWidth;
+  const height = rect && rect.height ? rect.height : window.innerHeight;
+  W = Math.max(1, Math.floor(width));
+  H = Math.max(1, Math.floor(height));
   canvas.width = W;
   canvas.height = H;
   draw();
@@ -65,30 +182,277 @@ window.onresize = () => {
   resizeTimer = setTimeout(resize, 150);
 };
 
+if (window.ResizeObserver && canvasContainer) {
+  const containerObserver = new ResizeObserver(() => resize());
+  containerObserver.observe(canvasContainer);
+}
+
 // ---- Utility Conversions ----
-function dateToX(dateStr) {
-  const base = new Date().getFullYear();
+function parseTimelineLength(spec) {
+  if (!spec) return null;
+  const trimmed = spec.trim().toLowerCase();
+  if (!trimmed) return null;
+  const match = trimmed.match(/^([0-9]*\.?[0-9]+)\s*([a-z]*)$/);
+  if (!match) return null;
+  const value = parseFloat(match[1]);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  const unit = match[2] || 'days';
+  switch (unit) {
+    case 'day':
+    case 'days':
+    case 'd':
+      return value;
+    case 'week':
+    case 'weeks':
+    case 'w':
+      return value * 7;
+    case 'month':
+    case 'months':
+    case 'm':
+      return value * 30.4375;
+    case 'year':
+    case 'years':
+    case 'y':
+      return value * 365;
+    case 'hour':
+    case 'hours':
+    case 'h':
+      return value / 24;
+    default:
+      return null;
+  }
+}
+
+function ensureTimelineSpan(spec) {
+  const parsed = parseTimelineLength(spec);
+  if (!parsed) return false;
+  timelineSpanSpec = spec.trim();
+  timelineSpanDays = parsed;
+  timelineSpanMs = timelineSpanDays * MS_PER_DAY;
+  localStorage.setItem('timelineSpanSpec', timelineSpanSpec);
+  return true;
+}
+
+function downloadFile(filename, content, mimeType) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  document.body.removeChild(anchor);
+  URL.revokeObjectURL(url);
+}
+
+function escapeCsv(value) {
+  if (value === null || value === undefined) return '""';
+  const stringValue = String(value);
+  const escaped = stringValue.replace(/"/g, '""');
+  return `"${escaped}"`;
+}
+
+if (!ensureTimelineSpan(timelineSpanSpec)) {
+  ensureTimelineSpan(DEFAULT_TIMELINE_SPEC);
+}
+
+function determineFocusAnchor() {
+  const now = Date.now();
+  if (!tasks.length) return new Date(now);
+
+  const currentYear = new Date().getFullYear();
+  const yearStats = new Map();
+  tasks.forEach((task) => {
+    const d = new Date(task.date);
+    if (Number.isNaN(d.getTime())) return;
+    const year = d.getFullYear();
+    const diff = Math.abs(d.getTime() - now);
+    if (!yearStats.has(year)) {
+      yearStats.set(year, {
+        count: 0,
+        closestDiff: diff,
+        closestDate: d,
+      });
+    }
+    const entry = yearStats.get(year);
+    entry.count += 1;
+    if (diff < entry.closestDiff) {
+      entry.closestDiff = diff;
+      entry.closestDate = d;
+    }
+  });
+
+  let bestYear = currentYear;
+  let bestCount = 0;
+  let bestDiff = Infinity;
+  let bestDate = new Date(bestYear, 0, 1);
+  yearStats.forEach((value, year) => {
+    if (
+      value.count > bestCount ||
+      (value.count === bestCount && value.closestDiff < bestDiff) ||
+      (
+        value.count === bestCount &&
+        value.closestDiff === bestDiff &&
+        Math.abs(year - currentYear) < Math.abs(bestYear - currentYear)
+      )
+    ) {
+      bestYear = year;
+      bestCount = value.count;
+      bestDiff = value.closestDiff;
+      bestDate = value.closestDate || new Date(year, 0, 1);
+    }
+  });
+
+  return bestDate;
+}
+
+function updateTimelineMetrics() {
+  const computedAnchor = determineFocusAnchor();
+  if (dragging === null || !dragMoved) {
+    focusAnchorDate = computedAnchor;
+  }
+  const dynamicMargin = Math.min(TIMELINE_MARGIN, W / 6);
+  timelineStart = dynamicMargin;
+  timelineEnd = Math.max(timelineStart + 1, W - dynamicMargin);
+  const timelineWidth = timelineEnd - timelineStart;
+
+  if (!Number.isFinite(timelineSpanMs) || timelineSpanMs <= 0) {
+    timelineSpanMs = MS_PER_DAY;
+    timelineSpanDays = 1;
+  }
+
+  let startMs;
+  if (timelineSpanDays >= 360) {
+    const year = focusAnchorDate.getFullYear();
+    startMs = new Date(year, 0, 1).getTime();
+  } else {
+    const anchorMs = focusAnchorDate.getTime();
+    startMs = anchorMs - timelineSpanMs / 2;
+    if (timelineSpanDays >= 2) {
+      const aligned = new Date(startMs);
+      aligned.setHours(0, 0, 0, 0);
+      startMs = aligned.getTime();
+    }
+  }
+
+  timelineStartDate = new Date(startMs);
+  timelineEndDate = new Date(timelineStartDate.getTime() + timelineSpanMs);
+
+  if (timelineSpanDays < 360) {
+    const anchorTime = focusAnchorDate.getTime();
+    const startTime = timelineStartDate.getTime();
+    const endTime = timelineEndDate.getTime();
+    if (anchorTime < startTime || anchorTime > endTime) {
+      const centeredStart = anchorTime - timelineSpanMs / 2;
+      timelineStartDate = new Date(centeredStart);
+      timelineEndDate = new Date(timelineStartDate.getTime() + timelineSpanMs);
+    }
+  }
+
+  pxPerMs = timelineWidth / timelineSpanMs;
+}
+
+function dateToX(dateInput) {
+  const d = dateInput instanceof Date ? dateInput : new Date(dateInput);
+  if (Number.isNaN(d.getTime()) || !Number.isFinite(pxPerMs) || pxPerMs <= 0) {
+    return (timelineStart + timelineEnd) / 2;
+  }
+  const diffMs = d.getTime() - timelineStartDate.getTime();
+  const x = timelineStart + diffMs * pxPerMs;
+  return Math.min(Math.max(x, timelineStart), timelineEnd);
+}
+
+function pad(num) {
+  return num.toString().padStart(2, '0');
+}
+
+function formatDateTimeLocal(date) {
+  const year = date.getFullYear();
+  const month = pad(date.getMonth() + 1);
+  const day = pad(date.getDate());
+  const hours = pad(date.getHours());
+  const minutes = pad(date.getMinutes());
+  return `${year}-${month}-${day}T${hours}:${minutes}`;
+}
+
+function formatDateTimePrompt(dateStr) {
   const d = new Date(dateStr);
-  const yearDiff = d.getFullYear() - base;
-  return W / 2 + yearDiff * 200;
+  if (Number.isNaN(d.getTime())) return dateStr || '';
+  const local = formatDateTimeLocal(d);
+  return local.replace('T', ' ');
+}
+
+function normalizeDateInput(value) {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const normalized = trimmed.includes('T') ? trimmed : trimmed.replace(' ', 'T');
+  const parsed = new Date(normalized);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return formatDateTimeLocal(parsed);
 }
 
 function xToDate(x) {
-  const baseYear = new Date().getFullYear();
-  const yearDiff = (x - W / 2) / 200;
-  const newYear = baseYear + yearDiff;
-  return new Date(newYear, 0, 1).toISOString().slice(0, 10);
+  if (!Number.isFinite(pxPerMs) || pxPerMs <= 0) {
+    return formatDateTimeLocal(new Date());
+  }
+  const clampedX = Math.min(Math.max(x, timelineStart), timelineEnd);
+  const diffMs = (clampedX - timelineStart) / pxPerMs;
+  const ms = timelineStartDate.getTime() + diffMs;
+  const date = new Date(ms);
+  return formatDateTimeLocal(date);
+}
+
+function formatShortDate(date) {
+  return `${MONTH_LABELS[date.getMonth()]} ${date.getDate()}, ${date.getFullYear()}`;
+}
+
+function formatShortDateTime(date) {
+  return `${MONTH_LABELS[date.getMonth()]} ${date.getDate()}, ${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function formatRangeLabel() {
+  const spanDays = timelineSpanMs / MS_PER_DAY;
+  const start = new Date(timelineStartDate);
+  const end = new Date(timelineEndDate.getTime() - 1);
+  if (spanDays < 2) {
+    return `${formatShortDateTime(start)} – ${formatShortDateTime(end)}`;
+  }
+  if (spanDays < 60) {
+    return `${formatShortDate(start)} – ${formatShortDate(end)}`;
+  }
+  const startYear = start.getFullYear();
+  const endYear = end.getFullYear();
+  if (startYear === endYear) {
+    return `${startYear}`;
+  }
+  return `${startYear} – ${endYear}`;
+}
+
+function formatDisplayDate(dateStr) {
+  const d = new Date(dateStr);
+  if (Number.isNaN(d.getTime())) return dateStr || '';
+  const month = MONTH_NAMES_FULL[d.getMonth()];
+  const day = d.getDate();
+  const year = d.getFullYear();
+  let hours = d.getHours();
+  const minutes = pad(d.getMinutes());
+  const ampm = hours >= 12 ? 'PM' : 'AM';
+  hours = hours % 12 || 12;
+  return `${month} ${day}, ${year} ${hours}:${minutes} ${ampm}`;
 }
 
 // ---- Core Logic ----
 function addTask() {
   const text = document.getElementById('taskText').value.trim();
-  const date = document.getElementById('taskDate').value;
+  const dateInput = document.getElementById('taskDate').value;
   const timerMinutes = parseInt(document.getElementById('taskTimer').value);
-  if (!text || !date) return alert('Enter task and date.');
+  const normalizedDate = normalizeDateInput(dateInput);
+  if (!text || !normalizedDate) return alert('Enter task, valid date, and time.');
 
   const endTime = timerMinutes ? Date.now() + timerMinutes * 60000 : null;
-  tasks.push({ text, date, done: false, endTime });
+  const defaultSide = tasks.length % 2 === 0 ? 'top' : 'bottom';
+  tasks.push({ text, date: normalizedDate, done: false, endTime, verticalSide: defaultSide });
   document.getElementById('taskText').value = '';
   document.getElementById('taskDate').value = '';
   document.getElementById('taskTimer').value = '';
@@ -108,36 +472,136 @@ function save() {
   localStorage.setItem('canvasTasks', JSON.stringify(tasks));
 }
 
+function exportTasksCsv() {
+  const rows = [
+    ['Task', 'Date', 'Completed', 'Timer End', 'Label Side']
+  ];
+  tasks.forEach((task) => {
+    const timerValue = task.endTime ? formatDateTimeLocal(new Date(task.endTime)) : '';
+    rows.push([
+      task.text || '',
+      task.date || '',
+      task.done ? 'Completed' : 'Pending',
+      timerValue,
+      task.verticalSide || ''
+    ]);
+  });
+  const csvContent = rows.map((row) => row.map(escapeCsv).join(',')).join('\r\n');
+  downloadFile('timeline_tasks.csv', csvContent, 'text/csv');
+}
+
+function exportNotesTxt() {
+  if (!notesField) return;
+  downloadFile('timeline_notes.txt', notesField.value || '', 'text/plain');
+}
+
 // ---- Drawing ----
+function drawTimelineTicks() {
+  const spanDays = timelineSpanMs / MS_PER_DAY;
+  const ticks = [];
+  if (spanDays >= 360) {
+    const start = new Date(timelineStartDate.getFullYear(), timelineStartDate.getMonth(), 1);
+    while (start <= timelineEndDate) {
+      ticks.push({
+        x: dateToX(new Date(start)),
+        label: MONTH_LABELS[start.getMonth()],
+      });
+      start.setMonth(start.getMonth() + 1);
+    }
+  } else if (spanDays >= 60) {
+    const tick = new Date(timelineStartDate);
+    tick.setHours(0, 0, 0, 0);
+    const dayOffset = tick.getDay();
+    tick.setDate(tick.getDate() - dayOffset);
+    while (tick <= timelineEndDate) {
+      ticks.push({
+        x: dateToX(new Date(tick)),
+        label: `${MONTH_LABELS[tick.getMonth()]} ${tick.getDate()}`,
+      });
+      tick.setDate(tick.getDate() + 7);
+    }
+  } else if (spanDays >= 2) {
+    const tick = new Date(timelineStartDate);
+    tick.setHours(0, 0, 0, 0);
+    while (tick <= timelineEndDate) {
+      ticks.push({
+        x: dateToX(new Date(tick)),
+        label: `${MONTH_LABELS[tick.getMonth()]} ${tick.getDate()}`,
+      });
+      tick.setDate(tick.getDate() + 1);
+    }
+  } else {
+    const tick = new Date(timelineStartDate);
+    tick.setMinutes(0, 0, 0);
+    while (tick <= timelineEndDate) {
+      ticks.push({
+        x: dateToX(new Date(tick)),
+        label: `${pad(tick.getHours())}:00`,
+      });
+      tick.setHours(tick.getHours() + 1);
+    }
+  }
+  return ticks;
+}
+
 function drawTimeline() {
+  ctx.save();
   ctx.strokeStyle = '#0ff5';
   ctx.lineWidth = 3;
   ctx.beginPath();
-  ctx.moveTo(50, H / 2);
-  ctx.lineTo(W - 50, H / 2);
+  ctx.moveTo(timelineStart, H / 2);
+  ctx.lineTo(timelineEnd, H / 2);
   ctx.stroke();
 
-  const today = new Date();
-  for (let i = -2; i <= 2; i++) {
-    const year = today.getFullYear() + i;
-    const x = W / 2 + i * 200;
-    ctx.fillStyle = '#0ff8';
-    ctx.fillRect(x - 1, H / 2 - 6, 2, 12);
-    ctx.fillText(year, x - 15, H / 2 + 25);
-  }
+  ctx.fillStyle = '#0ff8';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.font = '12px Segoe UI';
+
+  const ticks = drawTimelineTicks();
+  ticks.forEach((tick) => {
+    ctx.fillRect(tick.x - 1, H / 2 - 6, 2, 12);
+    ctx.fillText(tick.label, tick.x, H / 2 + 14);
+  });
+
+  ctx.font = '16px Segoe UI';
+  ctx.fillText(formatRangeLabel(), (timelineStart + timelineEnd) / 2, H / 2 + 36);
+  ctx.restore();
+}
+
+const timelineLengthInput = document.getElementById('timelineLength');
+if (timelineLengthInput) {
+  timelineLengthInput.value = timelineSpanSpec;
+  timelineLengthInput.addEventListener('change', (e) => {
+    const spec = e.target.value;
+    if (!ensureTimelineSpan(spec)) {
+      alert('Enter a positive number followed by a unit like days, weeks, months, years, or hours.');
+      e.target.value = timelineSpanSpec;
+      return;
+    }
+    e.target.value = timelineSpanSpec;
+    draw();
+  });
 }
 
 function drawTasks() {
-  ctx.font = "14px Segoe UI";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
+  ctx.font = '15px Segoe UI';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
 
   const now = Date.now();
   tasks.forEach((t, i) => {
-    const dateX = dateToX(t.date);
-    const y = H / 2 + (i % 2 === 0 ? -60 : 60);
+    const dateX = (dragging === i && typeof t.tempX === 'number') ? t.tempX : dateToX(t.date);
+    if (dragging !== i) delete t.tempX;
+    const verticalSide = t.verticalSide === 'bottom' ? 'bottom' : 'top';
+    if (t.verticalSide !== verticalSide) {
+      t.verticalSide = verticalSide;
+    }
+    const isUpper = verticalSide === 'top';
+    const textY = H / 2 + (isUpper ? -60 : 60);
+    const dateY = textY - 18;
     t.x = dateX;
-    t.y = y;
+    t.y = textY;
 
     // connector
     ctx.beginPath();
@@ -156,6 +620,15 @@ function drawTasks() {
     ctx.fill();
 
     // label
+    ctx.fillStyle = t.done ? '#0f83' : '#0ffb';
+    ctx.font = '12px Segoe UI';
+    ctx.save();
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(formatDisplayDate(t.date), t.x, dateY);
+    ctx.restore();
+
+    ctx.textBaseline = 'middle';
+    ctx.font = '15px Segoe UI';
     ctx.fillStyle = t.done ? '#0f83' : '#0ff';
     ctx.fillText(t.text, t.x, t.y);
 
@@ -172,6 +645,7 @@ function drawTasks() {
 }
 
 function draw() {
+  updateTimelineMetrics();
   ctx.clearRect(0, 0, W, H);
   drawTimeline();
   drawTasks();
@@ -179,44 +653,188 @@ function draw() {
 
 // ---- Interaction ----
 function isHit(t, mx, my) {
-  return Math.abs(mx - t.x) < 10 && Math.abs(my - H / 2) < 20;
+  const dx = mx - t.x;
+  const dy = my - H / 2;
+  return Math.sqrt(dx * dx + dy * dy) <= 14;
+}
+
+function findTaskIndexAt(mx, my) {
+  for (let i = tasks.length - 1; i >= 0; i--) {
+    if (isHit(tasks[i], mx, my)) return i;
+  }
+  return -1;
+}
+
+function openPositionPrompt(index) {
+  const task = tasks[index];
+  if (!task) return;
+  const current = task.verticalSide === 'bottom' ? 'bottom' : 'top';
+  const response = prompt('Type "top", "bottom", or "toggle" to move this task\'s label.', current);
+  if (response === null) return;
+  const value = response.trim().toLowerCase();
+  let nextPosition = current;
+  if (value === 'top' || value === 't' || value === 'upper' || value === 'above') {
+    nextPosition = 'top';
+  } else if (value === 'bottom' || value === 'b' || value === 'lower' || value === 'below') {
+    nextPosition = 'bottom';
+  } else if (value === 'toggle' || value === 'switch' || value === 'flip') {
+    nextPosition = current === 'top' ? 'bottom' : 'top';
+  } else {
+    alert('Please enter "top", "bottom", or "toggle".');
+    return;
+  }
+
+  if (task.verticalSide !== nextPosition) {
+    task.verticalSide = nextPosition;
+    save();
+    draw();
+  }
 }
 
 canvas.onmousedown = function (e) {
   const m = { x: e.offsetX, y: e.offsetY };
-  tasks.forEach((t, i) => {
+  dragging = null;
+  for (let i = tasks.length - 1; i >= 0; i--) {
+    const t = tasks[i];
     if (isHit(t, m.x, m.y)) {
       dragging = i;
       offsetX = m.x - t.x;
+      dragMoved = false;
+      t.tempX = t.x;
+      break;
     }
-  });
-};
-
-canvas.onmouseup = function () {
-  if (dragging !== null) {
-    const t = tasks[dragging];
-    t.date = xToDate(t.x);
-    dragging = null;
-    save();
-    draw();
   }
 };
+
+function handleMouseUp() {
+  if (dragging !== null) {
+    const index = dragging;
+    const t = tasks[index];
+    const moved = dragMoved;
+    if (dragMoved) {
+      const newX = typeof t.tempX === 'number' ? t.tempX : t.x;
+      const newDate = xToDate(newX);
+      if (newDate) {
+        t.date = newDate;
+        save();
+      }
+    }
+    delete t.tempX;
+    dragging = null;
+    dragMoved = false;
+    suppressNextClick = moved;
+    draw();
+  }
+}
+
+canvas.onmouseup = handleMouseUp;
+window.addEventListener('mouseup', handleMouseUp);
 
 canvas.onmousemove = function (e) {
   if (dragging !== null) {
-    tasks[dragging].x = e.offsetX - offsetX;
+    const task = tasks[dragging];
+    const desiredX = e.offsetX - offsetX;
+    const newX = Math.min(Math.max(desiredX, timelineStart), timelineEnd);
+    if (!dragMoved) {
+      const startX = typeof task.tempX === 'number' ? task.tempX : task.x;
+      if (Math.abs(newX - startX) < 2) return;
+    }
+    dragMoved = true;
+    task.tempX = newX;
     draw();
   }
 };
 
-canvas.ondblclick = function (e) {
-  const m = { x: e.offsetX, y: e.offsetY };
-  tasks.forEach((t) => {
-    if (isHit(t, m.x, m.y)) t.done = !t.done;
-  });
+canvas.addEventListener('click', (e) => {
+  if (clickTimer) {
+    clearTimeout(clickTimer);
+    clickTimer = null;
+  }
+  const { offsetX: mx, offsetY: my } = e;
+  clickTimer = setTimeout(() => {
+    clickTimer = null;
+    if (suppressNextClick) {
+      suppressNextClick = false;
+      return;
+    }
+    if (dragging !== null || dragMoved) return;
+    const index = findTaskIndexAt(mx, my);
+    if (index !== -1) {
+      openPositionPrompt(index);
+    }
+  }, CLICK_DELAY_MS);
+});
+
+canvas.addEventListener('dblclick', (e) => {
+  if (clickTimer) {
+    clearTimeout(clickTimer);
+    clickTimer = null;
+  }
+  const index = findTaskIndexAt(e.offsetX, e.offsetY);
+  if (index !== -1) {
+    openTaskDialog(index);
+  }
+});
+
+function openTaskDialog(index) {
+  const task = tasks[index];
+  if (!task) return;
+  const action = prompt('Enter "edit" to modify, "delete" to remove, or "toggle" to mark complete/incomplete.', 'edit');
+  if (!action) return;
+  const choice = action.trim().toLowerCase();
+  if (choice === 'delete' || choice === 'd') {
+    if (confirm(`Delete "${task.text}"?`)) {
+      tasks.splice(index, 1);
+      save();
+      draw();
+    }
+    return;
+  }
+  if (choice === 'toggle' || choice === 't') {
+    task.done = !task.done;
+    save();
+    draw();
+    return;
+  }
+  if (choice !== 'edit' && choice !== 'e') return;
+
+  const newText = prompt('Task description:', task.text);
+  if (newText === null) return;
+  const trimmedText = newText.trim();
+  if (!trimmedText) {
+    alert('Task description cannot be empty.');
+    return;
+  }
+
+  const defaultDatePrompt = formatDateTimePrompt(task.date);
+  const newDateInput = prompt(`Task date & time (${DATE_TIME_PROMPT_FORMAT}):`, defaultDatePrompt);
+  if (newDateInput === null) return;
+  const normalizedDate = normalizeDateInput(newDateInput);
+  if (!normalizedDate) {
+    alert('Invalid date/time.');
+    return;
+  }
+
+  const remainingMs = task.endTime && task.endTime > Date.now() ? task.endTime - Date.now() : 0;
+  const defaultMinutes = remainingMs > 0 ? Math.ceil(remainingMs / 60000) : '';
+  const timerInput = prompt('Timer minutes (leave blank to remove timer):', defaultMinutes);
+  if (timerInput === null) return;
+
+  task.text = trimmedText;
+  task.date = normalizedDate;
+
+  const timerTrimmed = timerInput.trim();
+  const minutes = parseInt(timerTrimmed, 10);
+  if (timerTrimmed === '' || Number.isNaN(minutes) || minutes <= 0) {
+    task.endTime = null;
+  } else {
+    task.endTime = Date.now() + minutes * 60000;
+    task.done = false;
+  }
+
   save();
   draw();
-};
+}
 
 // ---- Timer Engine ----
 function startTimerEngine() {
