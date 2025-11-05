@@ -56,17 +56,28 @@ const canvas = document.getElementById('timelineCanvas');
 const ctx = canvas.getContext('2d');
 let W, H;
 let tasks = JSON.parse(localStorage.getItem('canvasTasks')) || [];
-tasks.forEach((t) => {
+let seededVerticalSides = false;
+tasks.forEach((t, index) => {
   if (t.date && !t.date.includes('T')) {
     const normalized = normalizeDateInput(`${t.date}T00:00`);
     if (normalized) t.date = normalized;
   }
+  if (!t.verticalSide) {
+    t.verticalSide = index % 2 === 0 ? 'top' : 'bottom';
+    seededVerticalSides = true;
+  }
 });
+if (seededVerticalSides) {
+  localStorage.setItem('canvasTasks', JSON.stringify(tasks));
+}
 let dragging = null;
 let offsetX = 0;
 let dragMoved = false;
+let suppressNextClick = false;
+let clickTimer = null;
 let timerInterval = null;
 const DATE_TIME_PROMPT_FORMAT = 'YYYY-MM-DD HH:MM';
+const CLICK_DELAY_MS = 220;
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const TIMELINE_MARGIN = 120;
@@ -347,7 +358,8 @@ function addTask() {
   if (!text || !normalizedDate) return alert('Enter task, valid date, and time.');
 
   const endTime = timerMinutes ? Date.now() + timerMinutes * 60000 : null;
-  tasks.push({ text, date: normalizedDate, done: false, endTime });
+  const defaultSide = tasks.length % 2 === 0 ? 'top' : 'bottom';
+  tasks.push({ text, date: normalizedDate, done: false, endTime, verticalSide: defaultSide });
   document.getElementById('taskText').value = '';
   document.getElementById('taskDate').value = '';
   document.getElementById('taskTimer').value = '';
@@ -465,7 +477,11 @@ function drawTasks() {
   tasks.forEach((t, i) => {
     const dateX = (dragging === i && typeof t.tempX === 'number') ? t.tempX : dateToX(t.date);
     if (dragging !== i) delete t.tempX;
-    const isUpper = i % 2 === 0;
+    const verticalSide = t.verticalSide === 'bottom' ? 'bottom' : 'top';
+    if (t.verticalSide !== verticalSide) {
+      t.verticalSide = verticalSide;
+    }
+    const isUpper = verticalSide === 'top';
     const textY = H / 2 + (isUpper ? -60 : 60);
     const dateY = textY - 18;
     t.x = dateX;
@@ -526,6 +542,39 @@ function isHit(t, mx, my) {
   return Math.sqrt(dx * dx + dy * dy) <= 14;
 }
 
+function findTaskIndexAt(mx, my) {
+  for (let i = tasks.length - 1; i >= 0; i--) {
+    if (isHit(tasks[i], mx, my)) return i;
+  }
+  return -1;
+}
+
+function openPositionPrompt(index) {
+  const task = tasks[index];
+  if (!task) return;
+  const current = task.verticalSide === 'bottom' ? 'bottom' : 'top';
+  const response = prompt('Type "top", "bottom", or "toggle" to move this task\'s label.', current);
+  if (response === null) return;
+  const value = response.trim().toLowerCase();
+  let nextPosition = current;
+  if (value === 'top' || value === 't' || value === 'upper' || value === 'above') {
+    nextPosition = 'top';
+  } else if (value === 'bottom' || value === 'b' || value === 'lower' || value === 'below') {
+    nextPosition = 'bottom';
+  } else if (value === 'toggle' || value === 'switch' || value === 'flip') {
+    nextPosition = current === 'top' ? 'bottom' : 'top';
+  } else {
+    alert('Please enter "top", "bottom", or "toggle".');
+    return;
+  }
+
+  if (task.verticalSide !== nextPosition) {
+    task.verticalSide = nextPosition;
+    save();
+    draw();
+  }
+}
+
 canvas.onmousedown = function (e) {
   const m = { x: e.offsetX, y: e.offsetY };
   dragging = null;
@@ -545,6 +594,7 @@ function handleMouseUp() {
   if (dragging !== null) {
     const index = dragging;
     const t = tasks[index];
+    const moved = dragMoved;
     if (dragMoved) {
       const newX = typeof t.tempX === 'number' ? t.tempX : t.x;
       const newDate = xToDate(newX);
@@ -556,6 +606,7 @@ function handleMouseUp() {
     delete t.tempX;
     dragging = null;
     dragMoved = false;
+    suppressNextClick = moved;
     draw();
   }
 }
@@ -578,15 +629,36 @@ canvas.onmousemove = function (e) {
   }
 };
 
-canvas.ondblclick = function (e) {
-  const m = { x: e.offsetX, y: e.offsetY };
-  for (let i = tasks.length - 1; i >= 0; i--) {
-    if (isHit(tasks[i], m.x, m.y)) {
-      openTaskDialog(i);
-      break;
-    }
+canvas.addEventListener('click', (e) => {
+  if (clickTimer) {
+    clearTimeout(clickTimer);
+    clickTimer = null;
   }
-};
+  const { offsetX: mx, offsetY: my } = e;
+  clickTimer = setTimeout(() => {
+    clickTimer = null;
+    if (suppressNextClick) {
+      suppressNextClick = false;
+      return;
+    }
+    if (dragging !== null || dragMoved) return;
+    const index = findTaskIndexAt(mx, my);
+    if (index !== -1) {
+      openPositionPrompt(index);
+    }
+  }, CLICK_DELAY_MS);
+});
+
+canvas.addEventListener('dblclick', (e) => {
+  if (clickTimer) {
+    clearTimeout(clickTimer);
+    clickTimer = null;
+  }
+  const index = findTaskIndexAt(e.offsetX, e.offsetY);
+  if (index !== -1) {
+    openTaskDialog(index);
+  }
+});
 
 function openTaskDialog(index) {
   const task = tasks[index];
