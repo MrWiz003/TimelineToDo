@@ -11,6 +11,10 @@
     color: #0ff;
     font-family: "Segoe UI", sans-serif;
     overflow: hidden;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    position: relative;
   }
   #controls {
     position: absolute;
@@ -21,7 +25,11 @@
     border: 1px solid #0ff3;
     border-radius: 8px;
   }
-  input, button {
+  #canvasContainer {
+    flex: 1;
+    position: relative;
+  }
+  input, button, textarea {
     background: #111;
     color: #0ff;
     border: 1px solid #0ff4;
@@ -38,6 +46,36 @@
     min-width: 160px;
   }
   button:hover { background: #0ff3; cursor: pointer; }
+  #timelineCanvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+  #notesPanel {
+    flex: 0 0 auto;
+    background: rgba(0,0,0,0.65);
+    border-top: 1px solid #0ff3;
+    padding: 12px 16px 18px;
+  }
+  #notesPanel label {
+    display: block;
+    font-size: 14px;
+    margin-bottom: 6px;
+    color: #7ff;
+  }
+  #quickNotes {
+    width: 100%;
+    min-height: 90px;
+    resize: vertical;
+    font-size: 14px;
+    padding: 8px 10px;
+  }
+  .notes-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 8px;
+  }
 </style>
 </head>
 <body>
@@ -48,10 +86,21 @@
     <input id="taskTimer" type="number" placeholder="Timer (min)" min="1">
     <button onclick="addTask()">Add</button>
     <button onclick="clearTasks()">Clear</button>
+    <button onclick="exportTasksCsv()">Export Timeline CSV</button>
   </div>
-  <canvas id="timelineCanvas"></canvas>
+  <div id="canvasContainer">
+    <canvas id="timelineCanvas"></canvas>
+  </div>
+  <div id="notesPanel">
+    <label for="quickNotes">Quick Notes</label>
+    <textarea id="quickNotes" placeholder="Type quick notes..."></textarea>
+    <div class="notes-actions">
+      <button onclick="exportNotesTxt()">Export Notes</button>
+    </div>
+  </div>
 
 <script>
+const canvasContainer = document.getElementById('canvasContainer');
 const canvas = document.getElementById('timelineCanvas');
 const ctx = canvas.getContext('2d');
 let W, H;
@@ -76,6 +125,8 @@ let dragMoved = false;
 let suppressNextClick = false;
 let clickTimer = null;
 let timerInterval = null;
+const NOTES_KEY = 'timelineQuickNotes';
+const notesField = document.getElementById('quickNotes');
 const DATE_TIME_PROMPT_FORMAT = 'YYYY-MM-DD HH:MM';
 const CLICK_DELAY_MS = 220;
 
@@ -99,9 +150,19 @@ let timelineStart = 0;
 let timelineEnd = 0;
 let pxPerMs = 1;
 
+if (notesField) {
+  notesField.value = localStorage.getItem(NOTES_KEY) || '';
+  notesField.addEventListener('input', () => {
+    localStorage.setItem(NOTES_KEY, notesField.value);
+  });
+}
+
 function resize() {
-  W = window.innerWidth;
-  H = window.innerHeight;
+  const rect = canvasContainer ? canvasContainer.getBoundingClientRect() : null;
+  const width = rect && rect.width ? rect.width : window.innerWidth;
+  const height = rect && rect.height ? rect.height : window.innerHeight;
+  W = Math.max(1, Math.floor(width));
+  H = Math.max(1, Math.floor(height));
   canvas.width = W;
   canvas.height = H;
   draw();
@@ -112,6 +173,11 @@ window.onresize = () => {
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(resize, 150);
 };
+
+if (window.ResizeObserver && canvasContainer) {
+  const containerObserver = new ResizeObserver(() => resize());
+  containerObserver.observe(canvasContainer);
+}
 
 // ---- Utility Conversions ----
 function parseTimelineLength(spec) {
@@ -157,6 +223,25 @@ function ensureTimelineSpan(spec) {
   timelineSpanMs = timelineSpanDays * MS_PER_DAY;
   localStorage.setItem('timelineSpanSpec', timelineSpanSpec);
   return true;
+}
+
+function downloadFile(filename, content, mimeType) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  document.body.removeChild(anchor);
+  URL.revokeObjectURL(url);
+}
+
+function escapeCsv(value) {
+  if (value === null || value === undefined) return '""';
+  const stringValue = String(value);
+  const escaped = stringValue.replace(/"/g, '""');
+  return `"${escaped}"`;
 }
 
 if (!ensureTimelineSpan(timelineSpanSpec)) {
@@ -377,6 +462,29 @@ function clearTasks() {
 
 function save() {
   localStorage.setItem('canvasTasks', JSON.stringify(tasks));
+}
+
+function exportTasksCsv() {
+  const rows = [
+    ['Task', 'Date', 'Completed', 'Timer End', 'Label Side']
+  ];
+  tasks.forEach((task) => {
+    const timerValue = task.endTime ? formatDateTimeLocal(new Date(task.endTime)) : '';
+    rows.push([
+      task.text || '',
+      task.date || '',
+      task.done ? 'Completed' : 'Pending',
+      timerValue,
+      task.verticalSide || ''
+    ]);
+  });
+  const csvContent = rows.map((row) => row.map(escapeCsv).join(',')).join('\r\n');
+  downloadFile('timeline_tasks.csv', csvContent, 'text/csv');
+}
+
+function exportNotesTxt() {
+  if (!notesField) return;
+  downloadFile('timeline_notes.txt', notesField.value || '', 'text/plain');
 }
 
 // ---- Drawing ----
