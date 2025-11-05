@@ -34,6 +34,9 @@
     padding: 8px 12px;
     font-size: 16px;
   }
+  #timelineLength {
+    min-width: 160px;
+  }
   button:hover { background: #0ff3; cursor: pointer; }
 </style>
 </head>
@@ -41,6 +44,7 @@
   <div id="controls">
     <input id="taskText" type="text" placeholder="Task">
     <input id="taskDate" type="datetime-local">
+    <input id="timelineLength" type="text" placeholder="Timeline length (e.g., 1 year)">
     <input id="taskTimer" type="number" placeholder="Timer (min)" min="1">
     <button onclick="addTask()">Add</button>
     <button onclick="clearTasks()">Clear</button>
@@ -72,12 +76,17 @@ const MONTH_NAMES_FULL = [
 ];
 const MONTH_LABELS = MONTH_NAMES_FULL.map((name) => name.slice(0, 3));
 
-let focusYear = new Date().getFullYear();
-let baseDate = new Date(focusYear, 0, 1);
-let daysInFocusYear = 365;
+const DEFAULT_TIMELINE_SPEC = '1 year';
+
+let focusAnchorDate = new Date();
+let timelineSpanSpec = localStorage.getItem('timelineSpanSpec') || DEFAULT_TIMELINE_SPEC;
+let timelineSpanDays = 0;
+let timelineSpanMs = 0;
+let timelineStartDate = new Date();
+let timelineEndDate = new Date();
 let timelineStart = 0;
 let timelineEnd = 0;
-let pxPerDay = 1;
+let pxPerMs = 1;
 
 function resize() {
   W = window.innerWidth;
@@ -94,11 +103,60 @@ window.onresize = () => {
 };
 
 // ---- Utility Conversions ----
-function determineFocusYear() {
-  const now = Date.now();
-  const currentYear = new Date().getFullYear();
-  if (!tasks.length) return currentYear;
+function parseTimelineLength(spec) {
+  if (!spec) return null;
+  const trimmed = spec.trim().toLowerCase();
+  if (!trimmed) return null;
+  const match = trimmed.match(/^([0-9]*\.?[0-9]+)\s*([a-z]*)$/);
+  if (!match) return null;
+  const value = parseFloat(match[1]);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  const unit = match[2] || 'days';
+  switch (unit) {
+    case 'day':
+    case 'days':
+    case 'd':
+      return value;
+    case 'week':
+    case 'weeks':
+    case 'w':
+      return value * 7;
+    case 'month':
+    case 'months':
+    case 'm':
+      return value * 30.4375;
+    case 'year':
+    case 'years':
+    case 'y':
+      return value * 365;
+    case 'hour':
+    case 'hours':
+    case 'h':
+      return value / 24;
+    default:
+      return null;
+  }
+}
 
+function ensureTimelineSpan(spec) {
+  const parsed = parseTimelineLength(spec);
+  if (!parsed) return false;
+  timelineSpanSpec = spec.trim();
+  timelineSpanDays = parsed;
+  timelineSpanMs = timelineSpanDays * MS_PER_DAY;
+  localStorage.setItem('timelineSpanSpec', timelineSpanSpec);
+  return true;
+}
+
+if (!ensureTimelineSpan(timelineSpanSpec)) {
+  ensureTimelineSpan(DEFAULT_TIMELINE_SPEC);
+}
+
+function determineFocusAnchor() {
+  const now = Date.now();
+  if (!tasks.length) return new Date(now);
+
+  const currentYear = new Date().getFullYear();
   const yearStats = new Map();
   tasks.forEach((task) => {
     const d = new Date(task.date);
@@ -106,16 +164,24 @@ function determineFocusYear() {
     const year = d.getFullYear();
     const diff = Math.abs(d.getTime() - now);
     if (!yearStats.has(year)) {
-      yearStats.set(year, { count: 0, closestDiff: diff });
+      yearStats.set(year, {
+        count: 0,
+        closestDiff: diff,
+        closestDate: d,
+      });
     }
     const entry = yearStats.get(year);
     entry.count += 1;
-    if (diff < entry.closestDiff) entry.closestDiff = diff;
+    if (diff < entry.closestDiff) {
+      entry.closestDiff = diff;
+      entry.closestDate = d;
+    }
   });
 
   let bestYear = currentYear;
   let bestCount = 0;
   let bestDiff = Infinity;
+  let bestDate = new Date(bestYear, 0, 1);
   yearStats.forEach((value, year) => {
     if (
       value.count > bestCount ||
@@ -129,37 +195,66 @@ function determineFocusYear() {
       bestYear = year;
       bestCount = value.count;
       bestDiff = value.closestDiff;
+      bestDate = value.closestDate || new Date(year, 0, 1);
     }
   });
 
-  return bestYear;
-}
-
-function isLeapYear(year) {
-  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+  return bestDate;
 }
 
 function updateTimelineMetrics() {
-  const computedYear = determineFocusYear();
+  const computedAnchor = determineFocusAnchor();
   if (dragging === null || !dragMoved) {
-    focusYear = computedYear;
+    focusAnchorDate = computedAnchor;
   }
-  baseDate = new Date(focusYear, 0, 1);
-  daysInFocusYear = isLeapYear(focusYear) ? 366 : 365;
   const dynamicMargin = Math.min(TIMELINE_MARGIN, W / 6);
   timelineStart = dynamicMargin;
   timelineEnd = Math.max(timelineStart + 1, W - dynamicMargin);
   const timelineWidth = timelineEnd - timelineStart;
-  pxPerDay = timelineWidth / daysInFocusYear;
+
+  if (!Number.isFinite(timelineSpanMs) || timelineSpanMs <= 0) {
+    timelineSpanMs = MS_PER_DAY;
+    timelineSpanDays = 1;
+  }
+
+  let startMs;
+  if (timelineSpanDays >= 360) {
+    const year = focusAnchorDate.getFullYear();
+    startMs = new Date(year, 0, 1).getTime();
+  } else {
+    const anchorMs = focusAnchorDate.getTime();
+    startMs = anchorMs - timelineSpanMs / 2;
+    if (timelineSpanDays >= 2) {
+      const aligned = new Date(startMs);
+      aligned.setHours(0, 0, 0, 0);
+      startMs = aligned.getTime();
+    }
+  }
+
+  timelineStartDate = new Date(startMs);
+  timelineEndDate = new Date(timelineStartDate.getTime() + timelineSpanMs);
+
+  if (timelineSpanDays < 360) {
+    const anchorTime = focusAnchorDate.getTime();
+    const startTime = timelineStartDate.getTime();
+    const endTime = timelineEndDate.getTime();
+    if (anchorTime < startTime || anchorTime > endTime) {
+      const centeredStart = anchorTime - timelineSpanMs / 2;
+      timelineStartDate = new Date(centeredStart);
+      timelineEndDate = new Date(timelineStartDate.getTime() + timelineSpanMs);
+    }
+  }
+
+  pxPerMs = timelineWidth / timelineSpanMs;
 }
 
-function dateToX(dateStr) {
-  const d = new Date(dateStr);
-  if (Number.isNaN(d.getTime()) || !Number.isFinite(pxPerDay) || pxPerDay <= 0) {
+function dateToX(dateInput) {
+  const d = dateInput instanceof Date ? dateInput : new Date(dateInput);
+  if (Number.isNaN(d.getTime()) || !Number.isFinite(pxPerMs) || pxPerMs <= 0) {
     return (timelineStart + timelineEnd) / 2;
   }
-  const diffDays = (d - baseDate) / MS_PER_DAY;
-  const x = timelineStart + diffDays * pxPerDay;
+  const diffMs = d.getTime() - timelineStartDate.getTime();
+  const x = timelineStart + diffMs * pxPerMs;
   return Math.min(Math.max(x, timelineStart), timelineEnd);
 }
 
@@ -194,14 +289,40 @@ function normalizeDateInput(value) {
 }
 
 function xToDate(x) {
-  if (!Number.isFinite(pxPerDay) || pxPerDay <= 0) {
+  if (!Number.isFinite(pxPerMs) || pxPerMs <= 0) {
     return formatDateTimeLocal(new Date());
   }
   const clampedX = Math.min(Math.max(x, timelineStart), timelineEnd);
-  const diffDays = (clampedX - timelineStart) / pxPerDay;
-  const ms = baseDate.getTime() + diffDays * MS_PER_DAY;
+  const diffMs = (clampedX - timelineStart) / pxPerMs;
+  const ms = timelineStartDate.getTime() + diffMs;
   const date = new Date(ms);
   return formatDateTimeLocal(date);
+}
+
+function formatShortDate(date) {
+  return `${MONTH_LABELS[date.getMonth()]} ${date.getDate()}, ${date.getFullYear()}`;
+}
+
+function formatShortDateTime(date) {
+  return `${MONTH_LABELS[date.getMonth()]} ${date.getDate()}, ${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function formatRangeLabel() {
+  const spanDays = timelineSpanMs / MS_PER_DAY;
+  const start = new Date(timelineStartDate);
+  const end = new Date(timelineEndDate.getTime() - 1);
+  if (spanDays < 2) {
+    return `${formatShortDateTime(start)} – ${formatShortDateTime(end)}`;
+  }
+  if (spanDays < 60) {
+    return `${formatShortDate(start)} – ${formatShortDate(end)}`;
+  }
+  const startYear = start.getFullYear();
+  const endYear = end.getFullYear();
+  if (startYear === endYear) {
+    return `${startYear}`;
+  }
+  return `${startYear} – ${endYear}`;
 }
 
 function formatDisplayDate(dateStr) {
@@ -247,6 +368,54 @@ function save() {
 }
 
 // ---- Drawing ----
+function drawTimelineTicks() {
+  const spanDays = timelineSpanMs / MS_PER_DAY;
+  const ticks = [];
+  if (spanDays >= 360) {
+    const start = new Date(timelineStartDate.getFullYear(), timelineStartDate.getMonth(), 1);
+    while (start <= timelineEndDate) {
+      ticks.push({
+        x: dateToX(new Date(start)),
+        label: MONTH_LABELS[start.getMonth()],
+      });
+      start.setMonth(start.getMonth() + 1);
+    }
+  } else if (spanDays >= 60) {
+    const tick = new Date(timelineStartDate);
+    tick.setHours(0, 0, 0, 0);
+    const dayOffset = tick.getDay();
+    tick.setDate(tick.getDate() - dayOffset);
+    while (tick <= timelineEndDate) {
+      ticks.push({
+        x: dateToX(new Date(tick)),
+        label: `${MONTH_LABELS[tick.getMonth()]} ${tick.getDate()}`,
+      });
+      tick.setDate(tick.getDate() + 7);
+    }
+  } else if (spanDays >= 2) {
+    const tick = new Date(timelineStartDate);
+    tick.setHours(0, 0, 0, 0);
+    while (tick <= timelineEndDate) {
+      ticks.push({
+        x: dateToX(new Date(tick)),
+        label: `${MONTH_LABELS[tick.getMonth()]} ${tick.getDate()}`,
+      });
+      tick.setDate(tick.getDate() + 1);
+    }
+  } else {
+    const tick = new Date(timelineStartDate);
+    tick.setMinutes(0, 0, 0);
+    while (tick <= timelineEndDate) {
+      ticks.push({
+        x: dateToX(new Date(tick)),
+        label: `${pad(tick.getHours())}:00`,
+      });
+      tick.setHours(tick.getHours() + 1);
+    }
+  }
+  return ticks;
+}
+
 function drawTimeline() {
   ctx.save();
   ctx.strokeStyle = '#0ff5';
@@ -261,19 +430,30 @@ function drawTimeline() {
   ctx.textBaseline = 'top';
   ctx.font = '12px Segoe UI';
 
-  for (let month = 0; month <= 12; month++) {
-    const monthDate = new Date(focusYear, month, 1);
-    const diffDays = (monthDate - baseDate) / MS_PER_DAY;
-    const x = timelineStart + diffDays * pxPerDay;
-    ctx.fillRect(x - 1, H / 2 - 6, 2, 12);
-    if (month < 12) {
-      ctx.fillText(MONTH_LABELS[month], x, H / 2 + 14);
-    }
-  }
+  const ticks = drawTimelineTicks();
+  ticks.forEach((tick) => {
+    ctx.fillRect(tick.x - 1, H / 2 - 6, 2, 12);
+    ctx.fillText(tick.label, tick.x, H / 2 + 14);
+  });
 
   ctx.font = '16px Segoe UI';
-  ctx.fillText(`${focusYear}`, (timelineStart + timelineEnd) / 2, H / 2 + 36);
+  ctx.fillText(formatRangeLabel(), (timelineStart + timelineEnd) / 2, H / 2 + 36);
   ctx.restore();
+}
+
+const timelineLengthInput = document.getElementById('timelineLength');
+if (timelineLengthInput) {
+  timelineLengthInput.value = timelineSpanSpec;
+  timelineLengthInput.addEventListener('change', (e) => {
+    const spec = e.target.value;
+    if (!ensureTimelineSpan(spec)) {
+      alert('Enter a positive number followed by a unit like days, weeks, months, years, or hours.');
+      e.target.value = timelineSpanSpec;
+      return;
+    }
+    e.target.value = timelineSpanSpec;
+    draw();
+  });
 }
 
 function drawTasks() {
